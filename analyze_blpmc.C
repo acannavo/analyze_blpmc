@@ -109,7 +109,7 @@ void analyze_blpmc_scan() {
     // ----------------------------------------------------------
     // Relative path from Analysis/ to the TRANSX data folder
     // ----------------------------------------------------------
-    TString transxDir = "../Data/TRANSX";
+    TString transxDir = "Data/TRANSX";
 
     // ----------------------------------------------------------
     // 1. Scan TRANSX/ for subdirectories matching our naming
