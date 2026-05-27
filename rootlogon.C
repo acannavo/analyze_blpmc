@@ -7,7 +7,8 @@
     gROOT->ProcessLine(".L PolAnalysis.h+");
     
     cout << "Classes compiled and ready!" << endl;
-    cout << "Usage: .x analyze_blpmc.C" << endl;
+    gROOT->ProcessLine(".L analyze_blpmc.C");
+	cout << "Usage: .x analyze_blpmc.C" << endl;
     
     cout << "====================================" << endl;
 }

@@ -114,9 +114,6 @@ void SafeClose(TFile* &f) {
 // =========================================================
 void analyze_blpmc_scan() {
 
-    // ----------------------------------------------------------
-    // Path built from kScanParam — no hardcoded "TRANSX"
-    // ----------------------------------------------------------
     TString scanDir = "Data/" + kScanParam;
 
     // ----------------------------------------------------------
@@ -294,7 +291,7 @@ void analyze_blpmc_scan() {
             cout << "  Inel SpinUp:   " << nIU_total << " total -> using " << maxIU << endl;
             cout << "  Inel SpinDown: " << nID_total << " total -> using " << maxID << endl;
 
-            Bool_t isP16   = angle.Contains("16");
+            Bool_t  isP16   = angle.Contains("16");
             TString detName = isP16 ? "P16" : "P12";
             Int_t   nScint  = isP16 ? 4 : 3;
 
@@ -415,12 +412,15 @@ void draw_scan_both() {
 // and exposes all 1D/2D draw functions for that point.
 //
 // Usage:
-//   inspect("12p0", 0.0)   -> P12, param=0
-//   inspect("16p2", 10.0)  -> P16, param=10
+//   inspect("12p0", 0.0)        -> P12, param=0, all spins
+//   inspect("16p2", 10.0)       -> P16, param=10, all spins
+//   inspect("16p2", 0.0,  1)    -> P16, param=0, SpinUp only
+//   inspect("16p2", 0.0, -1)    -> P16, param=0, SpinDown only
 //
 // After calling inspect(), use:
 //   insp_draw_1d_raw()
 //   insp_draw_1d_comparison()
+//   insp_draw_1d_spin()
 //   insp_draw_2d()
 //   insp_draw_all()
 // =========================================================
@@ -430,10 +430,17 @@ PolHistograms *gInsp_hist  = nullptr;
 PolAnalysis   *gInsp_ana   = nullptr;
 TString        gInsp_label = "";
 
-// Helper: fill histograms from one tree (elastic or inelastic)
+// =========================================================
+// Helper: fill histograms from one tree
+//
+// isSpinUp is now passed through so FillWithCutsSpin() can
+// route into the correct spin histogram (hCutUp / hCutDown).
+// FillWithCuts() (combined) is also called so DrawComparison
+// continues to work unchanged.
+// =========================================================
 void InspFillTree(TTree *tree, Long64_t maxEntries,
                   PolHistograms *hist, PolAnalysis *ana,
-                  Int_t nScint) {
+                  Int_t nScint, Bool_t isSpinUp) {
 
     Double_t eDepP16LS0, eDepP16LS1, eDepP16LS2, eDepP16LS3;
     Double_t eDepP16RS0, eDepP16RS1, eDepP16RS2, eDepP16RS3;
@@ -464,15 +471,21 @@ void InspFillTree(TTree *tree, Long64_t maxEntries,
         if (nScint == 4) {
             Double_t e[8] = {eDepP16LS0, eDepP16LS1, eDepP16LS2, eDepP16LS3,
                              eDepP16RS0, eDepP16RS1, eDepP16RS2, eDepP16RS3};
-            for (Int_t j = 0; j < 8; j++) hist->Fill(j, e);
+            for (Int_t j = 0; j < 8; j++) {
+                hist->Fill(j, e);
+                hist->FillWithCuts(j, e, ana);
+                hist->FillWithCutsSpin(j, e, ana, isSpinUp);
+            }
             hist->Fill2D(e);
-            for (Int_t j = 0; j < 8; j++) hist->FillWithCuts(j, e, ana);
         } else {
             Double_t e[6] = {eDepP12LS0, eDepP12LS1, eDepP12LS2,
                              eDepP12RS0, eDepP12RS1, eDepP12RS2};
-            for (Int_t j = 0; j < 6; j++) hist->Fill(j, e);
+            for (Int_t j = 0; j < 6; j++) {
+                hist->Fill(j, e);
+                hist->FillWithCuts(j, e, ana);
+                hist->FillWithCutsSpin(j, e, ana, isSpinUp);
+            }
             hist->Fill2D(e);
-            for (Int_t j = 0; j < 6; j++) hist->FillWithCuts(j, e, ana);
         }
     }
 }
@@ -480,12 +493,11 @@ void InspFillTree(TTree *tree, Long64_t maxEntries,
 void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     // spin:  0 = all combined (default), +1 = SpinUp only, -1 = SpinDown only
 
-    Bool_t isP16    = angleKey.Contains("16");
-    TString detName  = isP16 ? "P16" : "P12";
-    Int_t   nScint   = isP16 ? 4 : 3;
+    Bool_t  isP16     = angleKey.Contains("16");
+    TString detName   = isP16 ? "P16" : "P12";
+    Int_t   nScint    = isP16 ? 4 : 3;
     TString angleFull = isP16 ? "16p2" : "12p0";
 
-    // Convert paramVal to folder name: 0.0->"0p0", 10.0->"10p0"
     TString paramKey = Form("%gp0", paramVal);
     paramKey.ReplaceAll(".", "p");
 
@@ -497,9 +509,6 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     cout << "\n=== Inspection: " << detName
          << "  " << kScanParam << "=" << paramVal << " ===" << endl;
 
-    // ----------------------------------------------------------
-    // Build the 4 folder paths
-    // ----------------------------------------------------------
     auto MakePath = [&](TString reac, TString spinStr) -> TString {
         return Form("%s/pC_%s_200MeV_MT_P80_%s_%s_MEYER/%s",
                     dataPath.Data(), reac.Data(), spinStr.Data(),
@@ -517,7 +526,7 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     TString fID = FindOutputRoot(dirID);
 
     if (fEU.IsNull()||fED.IsNull()||fIU.IsNull()||fID.IsNull()) {
-        cout << "[Error] Could not find ROOT files. Check angle/" 
+        cout << "[Error] Could not find ROOT files. Check angle/"
              << kScanParam << " values." << endl;
         cout << "  Looked in:" << endl;
         cout << "    " << dirEU << endl;
@@ -527,9 +536,6 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
         return;
     }
 
-    // ----------------------------------------------------------
-    // Open trees
-    // ----------------------------------------------------------
     TFile *hEU=nullptr, *hED=nullptr, *hIU=nullptr, *hID=nullptr;
     TTree *tEU = OpenTree(fEU, hEU);
     TTree *tED = OpenTree(fED, hED);
@@ -548,9 +554,6 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     cout << "  Inel SpinUp:   " << tIU->GetEntries() << " total -> using " << maxIU << endl;
     cout << "  Inel SpinDown: " << tID->GetEntries() << " total -> using " << maxID << endl;
 
-    // ----------------------------------------------------------
-    // (Re)create global inspection objects
-    // ----------------------------------------------------------
     if (gInsp_hist) { delete gInsp_hist; gInsp_hist = nullptr; }
     if (gInsp_ana)  { delete gInsp_ana;  gInsp_ana  = nullptr; }
 
@@ -579,24 +582,25 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     gInsp_ana->SetBeamPolarizationError(0.0);
 
     // ----------------------------------------------------------
-    // Fill histograms — filtered by spin argument
+    // Fill histograms — spin argument controls which trees are
+    // used for the raw/2D/combined-cut histograms, while
+    // InspFillTree always routes into the correct spin-separated
+    // cut histograms (hCutUp / hCutDown) via isSpinUp.
     // ----------------------------------------------------------
     if (spin >= 0) {
         cout << "  Filling SpinUp elastic..." << endl;
-        InspFillTree(tEU, -1,    gInsp_hist, gInsp_ana, nScint);
+        InspFillTree(tEU, -1,    gInsp_hist, gInsp_ana, nScint, true);
         cout << "  Filling SpinUp inelastic (normalized)..." << endl;
-        InspFillTree(tIU, maxIU, gInsp_hist, gInsp_ana, nScint);
+        InspFillTree(tIU, maxIU, gInsp_hist, gInsp_ana, nScint, true);
     }
     if (spin <= 0) {
         cout << "  Filling SpinDown elastic..." << endl;
-        InspFillTree(tED, -1,    gInsp_hist, gInsp_ana, nScint);
+        InspFillTree(tED, -1,    gInsp_hist, gInsp_ana, nScint, false);
         cout << "  Filling SpinDown inelastic (normalized)..." << endl;
-        InspFillTree(tID, maxID, gInsp_hist, gInsp_ana, nScint);
+        InspFillTree(tID, maxID, gInsp_hist, gInsp_ana, nScint, false);
     }
 
-    // ----------------------------------------------------------
-    // Count events for analysis (always use both spins for Ay)
-    // ----------------------------------------------------------
+    // Count events for Ay (always both spins)
     gInsp_ana->ResetCounts();
     gInsp_ana->CountEvents(tEU, true);
     gInsp_ana->CountEvents(tIU, true,  maxIU);
@@ -610,6 +614,7 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     cout << "\n=== Inspection ready! ===" << endl;
     cout << "  insp_draw_1d_raw()        - Raw 1D spectra" << endl;
     cout << "  insp_draw_1d_comparison() - Raw vs cut overlay with cut lines" << endl;
+    cout << "  insp_draw_1d_spin()       - Spin-up vs spin-down after cuts" << endl;
     cout << "  insp_draw_2d()            - 2D correlation plots" << endl;
     cout << "  insp_draw_all()           - All of the above" << endl;
 }
@@ -619,28 +624,41 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
 // =========================================================
 void insp_draw_1d_raw() {
     if (!gInsp_hist) { cout << "Run inspect() first!" << endl; return; }
-    TString title = Form("Raw Spectra — %s", gInsp_label.Data());
-    TCanvas *c = new TCanvas(Form("c_raw_%s", gInsp_label.Data()), title, 1400, 700);
+    TCanvas *c = new TCanvas(Form("c_raw_%s",  gInsp_label.Data()),
+                             Form("Raw Spectra — %s", gInsp_label.Data()),
+                             1400, 700);
     gInsp_hist->DrawRaw(c);
 }
 
 void insp_draw_1d_comparison() {
     if (!gInsp_hist || !gInsp_ana) { cout << "Run inspect() first!" << endl; return; }
-    TString title = Form("Raw vs Cuts — %s", gInsp_label.Data());
-    TCanvas *c = new TCanvas(Form("c_comp_%s", gInsp_label.Data()), title, 1400, 700);
+    TCanvas *c = new TCanvas(Form("c_comp_%s", gInsp_label.Data()),
+                             Form("Raw vs Cuts — %s", gInsp_label.Data()),
+                             1400, 700);
     gInsp_hist->DrawComparison(c, gInsp_ana);
+}
+
+void insp_draw_1d_spin() {
+    if (!gInsp_hist || !gInsp_ana) { cout << "Run inspect() first!" << endl; return; }
+    TCanvas *c = new TCanvas(Form("c_spin_%s", gInsp_label.Data()),
+                             Form("Spin#uparrow vs Spin#downarrow after cuts — %s",
+                                  gInsp_label.Data()),
+                             1400, 700);
+    gInsp_hist->DrawSpinComparison(c, gInsp_ana);
 }
 
 void insp_draw_2d() {
     if (!gInsp_hist) { cout << "Run inspect() first!" << endl; return; }
-    TString title = Form("2D Correlations — %s", gInsp_label.Data());
-    TCanvas *c = new TCanvas(Form("c_2d_%s", gInsp_label.Data()), title, 1400, 700);
+    TCanvas *c = new TCanvas(Form("c_2d_%s",   gInsp_label.Data()),
+                             Form("2D Correlations — %s", gInsp_label.Data()),
+                             1400, 700);
     gInsp_hist->Draw2D(c);
 }
 
 void insp_draw_all() {
     insp_draw_1d_raw();
     insp_draw_1d_comparison();
+    insp_draw_1d_spin();
     insp_draw_2d();
 }
 
@@ -732,7 +750,7 @@ void draw_count_vs_param() {
     // -------------------------------------------------------
     auto countBranch = [](TTree *t, const char *branch) -> Long64_t {
         if (!t) return 0LL;
-        TString cut = Form("%s>0", branch);
+        TString cut   = Form("%s>0", branch);
         TString hname = Form("_hCnt_%s_%p", branch, (void*)t);
         hname.ReplaceAll(">","_").ReplaceAll(".","_");
         t->Draw(Form("1>>%s(1,0,2)", hname.Data()), cut.Data(), "goff");
@@ -798,7 +816,7 @@ void draw_count_vs_param() {
         // 6. Fill graphs — loop over parameter values
         // -------------------------------------------------------
         for (Int_t ipt = 0; ipt < nPts; ipt++) {
-            TString paramKey = paramKeys[ipt];
+            TString  paramKey = paramKeys[ipt];
             Double_t paramVal = ParsePValue(paramKey);
 
             auto &roleMap = data[det.angle][paramKey];
@@ -859,7 +877,6 @@ void draw_count_vs_param() {
             mg->GetYaxis()->SetTitleSize(0.05);
             mg->GetYaxis()->SetTitleOffset(1.2);
 
-            // Legend only on the first pad
             if (is == 0) {
                 TLegend *leg = new TLegend(0.15, 0.65, 0.55, 0.88);
                 leg->SetBorderSize(0);
