@@ -1,15 +1,23 @@
 // =========================================================
 // analyze_blpmc.C — Parameter Scan
 //
-// Automatically scans Data/{kScanParam}/ folder structure:
-//   {kScanParam}/
+// Automatically scans Data/{gScanDir}/ folder structure:
+//   {gScanDir}/
 //     pC_{Elas|Inel443}_200MeV_MT_P80_{SpinUp|SpinDown}_{12p0|16p2}_MEYER/
-//       {0p0 .. 20p0}/
+//       {0p0 .. Np0}/
 //         blpmc_*-*-*_*-*-*.root
 //
-// For each (angle, param) point: accumulates elastic + inelastic
-// (with normalization factor) into one PolAnalysis object.
-// Results: TGraphErrors of Ay vs kScanParam for P12 and P16.
+// The scan directory is specified at runtime — not hardcoded.
+//
+// Usage (two equivalent ways):
+//   analyze_blpmc_scan("TRANSX_0_5_0p1")
+//   inspect("12p0", 4.0)                  // uses gScanDir automatically
+//
+//   gScanDir = "TRANSY_0_40_1"; analyze_blpmc_scan()
+//   inspect("16p2", 10.0)
+//
+// The scan parameter name (TRANSX, TRANSY, ROTX, ...) and
+// unit (mm / deg) are derived automatically from the folder name.
 // =========================================================
 
 #include <map>
@@ -19,17 +27,9 @@
 #include <sstream>
 
 // =========================================================
-// Configuration
+// Configuration — physics constants only, no path hardcoding
 // =========================================================
-
-// Scan parameter — change this to switch between:
-//   Translations : TRANSX, TRANSY, TRANSZ  (unit: mm)
-//   Rotations    : ROTX, ROTY, ROTZ        (unit: deg)
-// The value must match the folder name created by scan.sh.
-const TString kScanParam = "TRANSX";
-const TString kScanUnit  = "mm";    // "mm" for translations, "deg" for rotations
-
-const Double_t kInelFactor   = 0.1077;   // fraction of inelastic events to use
+const Double_t kInelFactor  = 0.1077;   // fraction of inelastic events to use
 
 // P16 (16.2 deg, 4 scintillators) cuts
 const Double_t kP16_S0_min = 1.5,  kP16_S0_max = 2.5;
@@ -48,10 +48,68 @@ const Double_t kP16_TheoAy  = 0.993;
 const Double_t kP12_TheoAy  = 0.786;
 
 // =========================================================
+// Runtime scan directory — set by the user at the prompt
+// or passed as argument to the main functions.
+//
+//   gScanDir = "TRANSX_0_5_0p1";
+//   analyze_blpmc_scan()
+//
+// =========================================================
+TString gScanDir = "";
+
+// =========================================================
 // Scan result containers (filled by analyze_blpmc_scan)
 // =========================================================
 TGraphErrors *gGraph_P16 = nullptr;
 TGraphErrors *gGraph_P12 = nullptr;
+
+// =========================================================
+// Global inspection objects (reused across inspect() calls)
+// =========================================================
+PolHistograms *gInsp_hist  = nullptr;
+PolAnalysis   *gInsp_ana   = nullptr;
+TString        gInsp_label = "";
+
+// =========================================================
+// Helper: derive scan parameter name and unit from folder name
+//
+//   "TRANSX_0_5_0p1"  -> param="TRANSX", unit="mm"
+//   "TRANSY_0_40_1"   -> param="TRANSY", unit="mm"
+//   "TRANSZ_0_10_1"   -> param="TRANSZ", unit="mm"
+//   "ROTX_0_10_1"     -> param="ROTX",   unit="deg"
+//   "ROTY_0_5_0p1"    -> param="ROTY",   unit="deg"
+//   "ROTZ_0_20_1"     -> param="ROTZ",   unit="deg"
+// =========================================================
+void ParseScanDir(const TString &dir, TString &param, TString &unit) {
+    // Parameter name = everything before the first underscore+digit
+    // e.g. "TRANSX_0_5_0p1" -> "TRANSX"
+    Ssiz_t pos = dir.First('_');
+    if (pos == kNPOS) {
+        // No underscore — treat the whole string as the param name
+        param = dir;
+    } else {
+        param = dir(0, pos);
+    }
+    unit = param.BeginsWith("TRANS") ? "mm" : "deg";
+}
+
+// =========================================================
+// Helper: validate gScanDir and resolve Data/ path.
+// Returns false and prints an error if gScanDir is not set.
+// =========================================================
+Bool_t ResolveScanDir(TString &scanDir, TString &param, TString &unit,
+                      const TString &userArg = "") {
+    if (userArg != "") gScanDir = userArg;
+    if (gScanDir == "") {
+        cout << "[Error] No scan directory set." << endl;
+        cout << "  Pass it as argument:  analyze_blpmc_scan(\"TRANSX_0_5_0p1\")" << endl;
+        cout << "  Or set globally:      gScanDir = \"TRANSX_0_5_0p1\"" << endl;
+        return false;
+    }
+    ParseScanDir(gScanDir, param, unit);
+    scanDir = "Data/" + gScanDir;
+    return true;
+}
 
 // =========================================================
 // Helper: find blpmc_*.root inside a folder
@@ -111,10 +169,18 @@ void SafeClose(TFile* &f) {
 
 // =========================================================
 // MAIN SCAN FUNCTION
+//
+// Usage:
+//   analyze_blpmc_scan("TRANSX_0_5_0p1")   // sets gScanDir and runs
+//   analyze_blpmc_scan()                    // uses existing gScanDir
 // =========================================================
-void analyze_blpmc_scan() {
+void analyze_blpmc_scan(TString userScanDir = "") {
 
-    TString scanDir = "Data/" + kScanParam;
+    TString scanDir, kScanParam, kScanUnit;
+    if (!ResolveScanDir(scanDir, kScanParam, kScanUnit, userScanDir)) return;
+
+    cout << "\n=== Scan directory : " << gScanDir  << " ===" << endl;
+    cout << "=== Parameter      : " << kScanParam << " [" << kScanUnit << "] ===" << endl;
 
     // ----------------------------------------------------------
     // 1. Scan folder structure and group by (angle, param_value)
@@ -171,9 +237,7 @@ void analyze_blpmc_scan() {
             if (!paramEntry->IsDirectory()) continue;
             if (paramName == "." || paramName == "..") continue;
             if (!paramName.Contains("p")) continue;
-
-            TString fullPath = plutoPath + "/" + paramName;
-            data[angle][paramName][role] = fullPath;
+            data[angle][paramName][role] = plutoPath + "/" + paramName;
         }
     }
 
@@ -195,7 +259,6 @@ void analyze_blpmc_scan() {
         return ParsePValue(a) < ParsePValue(b);
     });
 
-    cout << "\n=== " << kScanParam << " Scan ===" << endl;
     cout << "Angles found:  ";
     for (auto &a : angles) cout << ParsePValue(a) << "  ";
     cout << endl;
@@ -350,12 +413,15 @@ void draw_scan_p16() {
         cout << "Please run analyze_blpmc_scan() first!" << endl;
         return;
     }
+    TString param, unit;
+    ParseScanDir(gScanDir, param, unit);
+
     TCanvas *c = new TCanvas("cScan_P16",
-                             Form("Ay vs %s — P16 (16.2 deg)", kScanParam.Data()),
+                             Form("Ay vs %s — P16 (16.2 deg)", param.Data()),
                              900, 600);
     c->SetGrid();
     gGraph_P16->Draw("AP");
-    gGraph_P16->GetXaxis()->SetTitle(Form("%s [%s]", kScanParam.Data(), kScanUnit.Data()));
+    gGraph_P16->GetXaxis()->SetTitle(Form("%s [%s]", param.Data(), unit.Data()));
     gGraph_P16->GetYaxis()->SetTitle("A_{y}");
 
     TLine *lTheo = new TLine(gGraph_P16->GetXaxis()->GetXmin(), kP16_TheoAy,
@@ -378,12 +444,15 @@ void draw_scan_p12() {
         cout << "Please run analyze_blpmc_scan() first!" << endl;
         return;
     }
+    TString param, unit;
+    ParseScanDir(gScanDir, param, unit);
+
     TCanvas *c = new TCanvas("cScan_P12",
-                             Form("Ay vs %s — P12 (12.0 deg)", kScanParam.Data()),
+                             Form("Ay vs %s — P12 (12.0 deg)", param.Data()),
                              900, 600);
     c->SetGrid();
     gGraph_P12->Draw("AP");
-    gGraph_P12->GetXaxis()->SetTitle(Form("%s [%s]", kScanParam.Data(), kScanUnit.Data()));
+    gGraph_P12->GetXaxis()->SetTitle(Form("%s [%s]", param.Data(), unit.Data()));
     gGraph_P12->GetYaxis()->SetTitle("A_{y}");
 
     TLine *lTheo = new TLine(gGraph_P12->GetXaxis()->GetXmin(), kP12_TheoAy,
@@ -408,14 +477,11 @@ void draw_scan_both() {
 
 // =========================================================
 // INSPECTION MODE
-// Opens one (angle, param_value) point, fills PolHistograms,
-// and exposes all 1D/2D draw functions for that point.
 //
 // Usage:
-//   inspect("12p0", 0.0)        -> P12, param=0, all spins
-//   inspect("16p2", 10.0)       -> P16, param=10, all spins
-//   inspect("16p2", 0.0,  1)    -> P16, param=0, SpinUp only
-//   inspect("16p2", 0.0, -1)    -> P16, param=0, SpinDown only
+//   inspect("12p0", 4.0)          // uses gScanDir
+//   inspect("16p2", 0.0, 1)       // SpinUp only
+//   inspect("16p2", 0.0, -1)      // SpinDown only
 //
 // After calling inspect(), use:
 //   insp_draw_1d_raw()
@@ -425,19 +491,6 @@ void draw_scan_both() {
 //   insp_draw_all()
 // =========================================================
 
-// Global inspection objects (reused across calls)
-PolHistograms *gInsp_hist  = nullptr;
-PolAnalysis   *gInsp_ana   = nullptr;
-TString        gInsp_label = "";
-
-// =========================================================
-// Helper: fill histograms from one tree
-//
-// isSpinUp is now passed through so FillWithCutsSpin() can
-// route into the correct spin histogram (hCutUp / hCutDown).
-// FillWithCuts() (combined) is also called so DrawComparison
-// continues to work unchanged.
-// =========================================================
 void InspFillTree(TTree *tree, Long64_t maxEntries,
                   PolHistograms *hist, PolAnalysis *ana,
                   Int_t nScint, Bool_t isSpinUp) {
@@ -491,7 +544,16 @@ void InspFillTree(TTree *tree, Long64_t maxEntries,
 }
 
 void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
-    // spin:  0 = all combined (default), +1 = SpinUp only, -1 = SpinDown only
+    // spin: 0 = all combined (default), +1 = SpinUp only, -1 = SpinDown only
+
+    if (gScanDir == "") {
+        cout << "[Error] No scan directory set." << endl;
+        cout << "  Set it first: gScanDir = \"TRANSX_0_5_0p1\"" << endl;
+        return;
+    }
+
+    TString kScanParam, kScanUnit;
+    ParseScanDir(gScanDir, kScanParam, kScanUnit);
 
     Bool_t  isP16     = angleKey.Contains("16");
     TString detName   = isP16 ? "P16" : "P12";
@@ -501,13 +563,14 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     TString paramKey = Form("%gp0", paramVal);
     paramKey.ReplaceAll(".", "p");
 
-    TString dataPath = "Data/" + kScanParam;
+    TString dataPath = "Data/" + gScanDir;
     TString label    = Form("%s_%s%g", detName.Data(), kScanParam.Data(), paramVal);
     TString spinTag  = (spin == 1) ? "_SpinUp" : (spin == -1) ? "_SpinDown" : "_AllSpin";
     gInsp_label = label + spinTag;
 
     cout << "\n=== Inspection: " << detName
-         << "  " << kScanParam << "=" << paramVal << " ===" << endl;
+         << "  " << kScanParam << "=" << paramVal
+         << "  [" << gScanDir << "]" << " ===" << endl;
 
     auto MakePath = [&](TString reac, TString spinStr) -> TString {
         return Form("%s/pC_%s_200MeV_MT_P80_%s_%s_MEYER/%s",
@@ -526,8 +589,7 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     TString fID = FindOutputRoot(dirID);
 
     if (fEU.IsNull()||fED.IsNull()||fIU.IsNull()||fID.IsNull()) {
-        cout << "[Error] Could not find ROOT files. Check angle/"
-             << kScanParam << " values." << endl;
+        cout << "[Error] Could not find ROOT files." << endl;
         cout << "  Looked in:" << endl;
         cout << "    " << dirEU << endl;
         cout << "    " << dirED << endl;
@@ -581,12 +643,6 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
     gInsp_ana->SetBeamPolarization(kBeamPol);
     gInsp_ana->SetBeamPolarizationError(0.0);
 
-    // ----------------------------------------------------------
-    // Fill histograms — spin argument controls which trees are
-    // used for the raw/2D/combined-cut histograms, while
-    // InspFillTree always routes into the correct spin-separated
-    // cut histograms (hCutUp / hCutDown) via isSpinUp.
-    // ----------------------------------------------------------
     if (spin >= 0) {
         cout << "  Filling SpinUp elastic..." << endl;
         InspFillTree(tEU, -1,    gInsp_hist, gInsp_ana, nScint, true);
@@ -600,7 +656,6 @@ void inspect(TString angleKey, Double_t paramVal, Int_t spin = 0) {
         InspFillTree(tID, maxID, gInsp_hist, gInsp_ana, nScint, false);
     }
 
-    // Count events for Ay (always both spins)
     gInsp_ana->ResetCounts();
     gInsp_ana->CountEvents(tEU, true);
     gInsp_ana->CountEvents(tIU, true,  maxIU);
@@ -665,25 +720,14 @@ void insp_draw_all() {
 // =========================================================
 // SUMMARY COUNT PLOT
 //
-// For each scan parameter value, plots the raw hit counts
-// in each scintillator vs the scan parameter value.
-//
-// Produces one canvas per detector (P12, P16), with one pad
-// per scintillator, each pad showing 4 graphs:
-//   Left  SpinUp   (blue solid circle)
-//   Left  SpinDown (blue open  circle)
-//   Right SpinUp   (red  solid square)
-//   Right SpinDown (red  open  square)
-//
-// Only elastic trees are used (inelastic normalization would
-// distort a raw-count overview).
-//
-// Can be called stand-alone or after analyze_blpmc_scan():
-//   draw_count_vs_param()
+// Usage:
+//   draw_count_vs_param("TRANSX_0_5_0p1")  // sets gScanDir and runs
+//   draw_count_vs_param()                   // uses existing gScanDir
 // =========================================================
-void draw_count_vs_param() {
+void draw_count_vs_param(TString userScanDir = "") {
 
-    TString scanDir = "Data/" + kScanParam;
+    TString scanDir, kScanParam, kScanUnit;
+    if (!ResolveScanDir(scanDir, kScanParam, kScanUnit, userScanDir)) return;
 
     // -------------------------------------------------------
     // 1. Discover folder structure
@@ -791,30 +835,22 @@ void draw_count_vs_param() {
 
         Int_t ns = det.nScint;
 
-        // 4 graphs per scintillator: [scint][0=L_up, 1=L_down, 2=R_up, 3=R_down]
         std::vector<std::array<TGraphErrors*,4>> graphs(ns);
         for (Int_t is = 0; is < ns; is++) {
             for (Int_t ig = 0; ig < 4; ig++) {
                 graphs[is][ig] = new TGraphErrors(nPts);
                 graphs[is][ig]->SetMarkerSize(0.8);
             }
-            // L-up:   blue solid circle
             graphs[is][0]->SetMarkerStyle(20); graphs[is][0]->SetMarkerColor(kBlue+1);
             graphs[is][0]->SetLineColor(kBlue+1); graphs[is][0]->SetLineStyle(1);
-            // L-down: blue open circle
             graphs[is][1]->SetMarkerStyle(24); graphs[is][1]->SetMarkerColor(kBlue+1);
             graphs[is][1]->SetLineColor(kBlue+1); graphs[is][1]->SetLineStyle(2);
-            // R-up:   red solid square
             graphs[is][2]->SetMarkerStyle(21); graphs[is][2]->SetMarkerColor(kRed+1);
             graphs[is][2]->SetLineColor(kRed+1); graphs[is][2]->SetLineStyle(1);
-            // R-down: red open square
             graphs[is][3]->SetMarkerStyle(25); graphs[is][3]->SetMarkerColor(kRed+1);
             graphs[is][3]->SetLineColor(kRed+1); graphs[is][3]->SetLineStyle(2);
         }
 
-        // -------------------------------------------------------
-        // 6. Fill graphs — loop over parameter values
-        // -------------------------------------------------------
         for (Int_t ipt = 0; ipt < nPts; ipt++) {
             TString  paramKey = paramKeys[ipt];
             Double_t paramVal = ParsePValue(paramKey);
@@ -847,9 +883,6 @@ void draw_count_vs_param() {
             SafeClose(fDown);
         }
 
-        // -------------------------------------------------------
-        // 7. Draw — one canvas per detector, ns pads side by side
-        // -------------------------------------------------------
         Int_t cW = 400 * ns;
         TCanvas *c = new TCanvas(det.canvName.Data(),
                                  Form("Scintillator counts vs %s — %s",
