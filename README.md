@@ -14,6 +14,8 @@ asymmetries) is the physically correct combination.
 
 ## Typical Usage
 
+### First session: Run a scan and save results
+
 ```bash
 # 1. Go to the Analysis folder
 cd ~/Analysis
@@ -44,6 +46,24 @@ inspect("16p2", 0.0, 0, 199.5)     # all spins combined
 inspect("12p0", 10.0, 1, 199.5)    # spin-up only
 inspect("16p2", 5.0, -1, 199.5)    # spin-down only
 insp_draw_all()                     # all inspection plots for that point
+
+# 7. Save scan results to disk for future sessions (explicit call)
+SaveScanCache()                     # writes to Cache/{scanDir}.root
+```
+
+### Later session: Load cached scan results instantly
+
+```bash
+# In a fresh ROOT session, reload the scan without re-reading files
+cd ~/Analysis
+root
+.L analyze_blpmc.C
+LoadScanCache()                # loads Cache/{scanDir}.root (or specify path)
+
+# All drawing functions now work immediately — zero Geant4 files opened
+draw_scan_p16()
+draw_scan_p12()
+draw_count_vs_param("elas", true)
 ```
 
 ---
@@ -443,6 +463,90 @@ inelastic curves (raw and full-cut) reflect the full inelastic statistics
 
 Reads entirely from the cache filled by `analyze_blpmc_scan()` — no files
 are reopened. Run the scan at least once first.
+
+---
+
+## Persistent Scan Cache (SaveScanCache / LoadScanCache)
+
+Previously, all scan results (the six `A_y` graphs and count-cache) lived
+only in ROOT's runtime memory — lost as soon as the session ended, forcing
+a complete re-scan (potentially many files, several minutes) just to view a
+plot again.
+
+### Saving Results: `SaveScanCache()`
+
+```cpp
+analyze_blpmc_scan("ROTY_m0p2_p0p1_0p01_Pin_P80", 199.5)   // run the scan
+
+// Examine results
+draw_scan_p16()
+draw_scan_p12()
+
+// When satisfied, save to disk (explicit call only — not automatic)
+SaveScanCache()                    // writes to Cache/{scanDir}.root
+SaveScanCache("myCustomName.root") // or specify a custom path
+```
+
+`SaveScanCache()` writes to a plain ROOT `TFile` containing:
+- All six A_y `TGraphErrors` (`gGraph_P16_elas`, `gGraph_P16_inel`,
+  `gGraph_P16_weighted`, and the P12 equivalents)
+- The full count-cache (`gCountGraphs_P16` and `gCountGraphs_P12` — 12 graphs
+  per detector)
+- Scan metadata (scan directory name, parameter name/unit, inelastic factors,
+  beam polarization, validity flags)
+
+**Important:** `SaveScanCache()` is called **explicitly only** — `analyze_blpmc_scan()`
+does not auto-save. This deliberate choice prevents an unsatisfactory or
+partial scan from silently overwriting a good cached result.
+
+Default path: `Cache/{gScanDir}.root` (subdirectory auto-created if missing).
+
+### Loading Results: `LoadScanCache()`
+
+```cpp
+# In a fresh ROOT session, load a previous scan without reopening files
+LoadScanCache()                    // loads from Cache/{gScanDir}.root
+LoadScanCache("myCustomName.root") // or specify a custom path
+
+# Now all draw functions work instantly — zero Geant4 files opened
+draw_scan_p16()
+draw_scan_p12()
+draw_scan_both()
+draw_count_vs_param()
+```
+
+`LoadScanCache()` reads the cached `TFile` back into the same global graphs
+and metadata, so `draw_scan_p16()`, `draw_scan_p12()`, `draw_scan_both()`,
+and `draw_count_vs_param()` work immediately with no file I/O.
+
+If the cache is missing expected graphs, a loud warning is printed
+(consistent with the beam-polarization auto-detection fallback behavior)
+but execution continues.
+
+**Note:** Inspection mode histograms (`inspect()` + `insp_draw_*`) are
+intentionally **not** cached — a single `inspect()` call only opens four
+files and is already fast, and caching adds unnecessary complexity.
+
+### Workflow Example
+
+```cpp
+# Session 1: Run the scan and save
+root
+.L analyze_blpmc.C
+analyze_blpmc_scan("ROTY_m0p2_p0p1_0p01_Pin_P80", 199.5)
+draw_scan_p16()
+draw_scan_p12()
+SaveScanCache()   // writes Cache/ROTY_m0p2_p0p1_0p01_Pin_P80.root
+.q
+
+# Session 2: Load and view results instantly
+root
+.L analyze_blpmc.C
+LoadScanCache()   # restores gGraph_P16_weighted, gCountGraphs_P16, etc.
+draw_scan_p16()   # plots immediately — no files reopened
+draw_count_vs_param("elas", true)
+.q
+```
 
 ---
 
