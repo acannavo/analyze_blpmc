@@ -63,6 +63,9 @@
 #include <iostream>
 #include <sstream>
 #include "ROOT/RDataFrame.hxx"
+#include "TFile.h"
+#include "TNamed.h"
+#include "TParameter.h"
 
 // =========================================================
 // Configuration — physics constants
@@ -1058,6 +1061,8 @@ void analyze_blpmc_scan(TString userScanDir = "", Double_t beamEnergy = 200.0,
     cout << "Call draw_scan_p16() / draw_scan_p12() / draw_scan_both() to view results." << endl;
     cout << "  mode = \"weighted\" (default, correct)  \"elas\"  \"inel\"  \"all\"" << endl;
     cout << "Call draw_count_vs_param() to view cached scintillator counts (no re-reading)." << endl;
+    cout << "Call SaveScanCache() to persist this cache to disk (Cache/<gScanDir>.root)," << endl;
+    cout << "  so a future ROOT session can LoadScanCache() and skip re-scanning entirely." << endl;
 }
 
 
@@ -1854,4 +1859,213 @@ void draw_count_vs_param(TString mode = "elas", Bool_t showCuts = false) {
         c->Update();
         cout << "Canvas " << det.canvName << " created (from cache, no files reopened)." << endl;
     }
+}
+
+// =========================================================
+// ─── SECTION 12: SCAN CACHE PERSISTENCE (SAVE/LOAD) ──────
+//
+// Everything analyze_blpmc_scan() computes lives only in the runtime
+// globals above (gGraph_P16/P12_*, gCountGraphs_P16/P12, gInelFactor_*,
+// gBeamPol, gScanDir) — normally lost when the ROOT session ends, forcing
+// a full re-scan (many files, many minutes) just to look at a plot again.
+//
+// SaveScanCache() / LoadScanCache() write/read exactly those globals to
+// a plain TFile, so a later session can call LoadScanCache() and go
+// straight to draw_scan_p16()/draw_scan_p12()/draw_scan_both()/
+// draw_count_vs_param() — with ZERO Geant4 files reopened.
+//
+// This is saved ONLY on explicit request — analyze_blpmc_scan() does
+// NOT auto-save. Call SaveScanCache() yourself when you're happy with
+// a scan's results.
+//
+// inspect()'s per-point histograms (gInsp_hist, gInsp_ana, ...) are
+// NOT included — a single inspect() call only opens 4 files and is
+// already fast, so there's no re-scan cost to avoid there.
+//
+// File layout (plain TFile, inspectable with a TBrowser):
+//   Top-level metadata (TNamed / TParameter<T>):
+//     gScanDir, kScanParam, kScanUnit, gInelFactor_P16, gInelFactor_P12,
+//     gBeamPol, gCountsValid_P16, gCountsValid_P12
+//   A_y graphs, already named as they exist in memory:
+//     gAy_P16_elas, gAy_P16_inel, gAy_P16_weighted,
+//     gAy_P12_elas, gAy_P12_inel, gAy_P12_weighted
+//   Count-cache graphs, named on the way out (slot layout matches the
+//   comment above the gCountGraphs_P16/P12 declarations):
+//     cnt_P16_S<is>_slot<00-15>, cnt_P12_S<is>_slot<00-15>
+//
+// Usage:
+//   SaveScanCache()                 // auto: Cache/<gScanDir>.root
+//   SaveScanCache("myscan.root")    // explicit filename
+//   LoadScanCache()                 // needs gScanDir set; auto path as above
+//   LoadScanCache("myscan.root")    // explicit filename
+// =========================================================
+
+void SaveScanCache(TString filename = "") {
+    if (gScanDir == "") {
+        cout << "[Error] gScanDir is not set — nothing to identify this cache by." << endl;
+        return;
+    }
+    Bool_t haveAnyAy = gGraph_P16_weighted || gGraph_P12_weighted;
+    if (!haveAnyAy && !gCountsValid_P16 && !gCountsValid_P12) {
+        cout << "[Error] No scan data in memory. Run analyze_blpmc_scan() first!" << endl;
+        return;
+    }
+
+    if (filename == "") {
+        gSystem->mkdir("Cache", kTRUE);   // kTRUE = create parent dirs too
+        filename = "Cache/" + gScanDir + ".root";
+    }
+
+    TFile *f = TFile::Open(filename.Data(), "RECREATE");
+    if (!f || f->IsZombie()) {
+        cout << "[Error] Could not open \"" << filename << "\" for writing." << endl;
+        return;
+    }
+
+    // ── Metadata ──
+    TString kScanParam, kScanUnit;
+    ParseScanDir(gScanDir, kScanParam, kScanUnit);
+
+    TNamed(  "gScanDir",         gScanDir.Data()  ).Write();
+    TNamed(  "kScanParam",       kScanParam.Data()).Write();
+    TNamed(  "kScanUnit",        kScanUnit.Data() ).Write();
+    TParameter<Double_t>("gInelFactor_P16",  gInelFactor_P16      ).Write();
+    TParameter<Double_t>("gInelFactor_P12",  gInelFactor_P12      ).Write();
+    TParameter<Double_t>("gBeamPol",         gBeamPol             ).Write();
+    TParameter<Int_t>(   "gCountsValid_P16", (Int_t)gCountsValid_P16).Write();
+    TParameter<Int_t>(   "gCountsValid_P12", (Int_t)gCountsValid_P12).Write();
+
+    // ── A_y graphs — already named, just write them ──
+    auto writeGraph = [](TGraphErrors *g) { if (g) g->Write(); };
+    writeGraph(gGraph_P16_elas); writeGraph(gGraph_P16_inel); writeGraph(gGraph_P16_weighted);
+    writeGraph(gGraph_P12_elas); writeGraph(gGraph_P12_inel); writeGraph(gGraph_P12_weighted);
+
+    // ── Count-cache graphs — name them on the way out ──
+    auto writeCountGraphs = [](std::vector<TGraphErrors*> &cg, const TString &det,
+                               Int_t nScint, Bool_t valid) {
+        if (!valid) return;
+        for (Int_t is = 0; is < nScint; is++) {
+            for (Int_t slot = 0; slot < 16; slot++) {
+                TGraphErrors *g = cg[is*16+slot];
+                if (!g) continue;
+                g->Write(Form("cnt_%s_S%d_slot%02d", det.Data(), is, slot));
+            }
+        }
+    };
+    writeCountGraphs(gCountGraphs_P16, "P16", 4, gCountsValid_P16);
+    writeCountGraphs(gCountGraphs_P12, "P12", 3, gCountsValid_P12);
+
+    f->Close();
+    delete f;
+
+    cout << "\n=== Scan cache saved: " << filename << " ===" << endl;
+    cout << "  gScanDir       = " << gScanDir << endl;
+    cout << "  A_y graphs     = " << (haveAnyAy ? "yes" : "no") << endl;
+    cout << "  P16 count-cache = " << (gCountsValid_P16 ? "yes" : "no (not in this scan)") << endl;
+    cout << "  P12 count-cache = " << (gCountsValid_P12 ? "yes" : "no (not in this scan)") << endl;
+}
+
+void LoadScanCache(TString filename = "") {
+    if (filename == "") {
+        if (gScanDir == "") {
+            cout << "[Error] No filename given and gScanDir is not set — cannot guess the cache path." << endl;
+            cout << "  Either set gScanDir = \"...\" first, or call LoadScanCache(\"path/to/file.root\")." << endl;
+            return;
+        }
+        filename = "Cache/" + gScanDir + ".root";
+    }
+
+    TFile *f = TFile::Open(filename.Data(), "READ");
+    if (!f || f->IsZombie()) {
+        cout << "[Error] Could not open cache file: " << filename << endl;
+        return;
+    }
+
+    // ── Metadata ──
+    auto getNamed = [&](const char *key) -> TString {
+        TNamed *n = (TNamed*)f->Get(key);
+        return n ? TString(n->GetTitle()) : TString("");
+    };
+    auto getParamD = [&](const char *key, Double_t fallback) -> Double_t {
+        TParameter<Double_t> *p = (TParameter<Double_t>*)f->Get(key);
+        return p ? p->GetVal() : fallback;
+    };
+    auto getParamI = [&](const char *key, Int_t fallback) -> Int_t {
+        TParameter<Int_t> *p = (TParameter<Int_t>*)f->Get(key);
+        return p ? p->GetVal() : fallback;
+    };
+
+    TString savedScanDir = getNamed("gScanDir");
+    if (savedScanDir == "") {
+        cout << "[Warning] Cache file has no gScanDir metadata — is this really a scan cache file?" << endl;
+    } else if (gScanDir != "" && savedScanDir != gScanDir) {
+        cout << "[Warning] Cache's gScanDir (\"" << savedScanDir << "\") differs from the current"
+             << " gScanDir (\"" << gScanDir << "\") — loading anyway, but check you meant to." << endl;
+    }
+    if (savedScanDir != "") gScanDir = savedScanDir;
+
+    gInelFactor_P16  = getParamD("gInelFactor_P16", -1.0);
+    gInelFactor_P12  = getParamD("gInelFactor_P12", -1.0);
+    gBeamPol         = getParamD("gBeamPol",        -1.0);
+    gCountsValid_P16 = (Bool_t)getParamI("gCountsValid_P16", 0);
+    gCountsValid_P12 = (Bool_t)getParamI("gCountsValid_P12", 0);
+
+    // ── Clear whatever is currently in memory before loading ──
+    auto safeDelG = [](TGraphErrors* &g) { if (g) { delete g; g = nullptr; } };
+    safeDelG(gGraph_P16_elas);     safeDelG(gGraph_P16_inel);     safeDelG(gGraph_P16_weighted);
+    safeDelG(gGraph_P12_elas);     safeDelG(gGraph_P12_inel);     safeDelG(gGraph_P12_weighted);
+
+    auto freeCountGraphs = [](std::vector<TGraphErrors*> &v) {
+        for (auto &g : v) if (g) { delete g; g = nullptr; }
+        v.clear();
+    };
+    freeCountGraphs(gCountGraphs_P16);
+    freeCountGraphs(gCountGraphs_P12);
+
+    // ── A_y graphs — Clone() so they survive f->Close() below ──
+    auto getGraph = [&](const char *key) -> TGraphErrors* {
+        TGraphErrors *g = (TGraphErrors*)f->Get(key);
+        return g ? (TGraphErrors*)g->Clone() : nullptr;
+    };
+    gGraph_P16_elas     = getGraph("gAy_P16_elas");
+    gGraph_P16_inel     = getGraph("gAy_P16_inel");
+    gGraph_P16_weighted = getGraph("gAy_P16_weighted");
+    gGraph_P12_elas     = getGraph("gAy_P12_elas");
+    gGraph_P12_inel     = getGraph("gAy_P12_inel");
+    gGraph_P12_weighted = getGraph("gAy_P12_weighted");
+
+    if (!gGraph_P16_weighted && !gGraph_P12_weighted)
+        cout << "[Warning] Neither P16 nor P12 weighted A_y graph found in cache — file may be incomplete." << endl;
+
+    // ── Count-cache graphs ──
+    auto loadCountGraphs = [&](std::vector<TGraphErrors*> &cg, const TString &det,
+                               Int_t nScint, Bool_t valid) {
+        if (!valid) return;
+        cg.assign(nScint * 16, nullptr);
+        Int_t nMissing = 0;
+        for (Int_t is = 0; is < nScint; is++) {
+            for (Int_t slot = 0; slot < 16; slot++) {
+                TString key = Form("cnt_%s_S%d_slot%02d", det.Data(), is, slot);
+                TGraphErrors *g = (TGraphErrors*)f->Get(key.Data());
+                if (!g) { nMissing++; continue; }
+                cg[is*16+slot] = (TGraphErrors*)g->Clone();
+            }
+        }
+        if (nMissing > 0)
+            cout << "[Warning] " << det << " count-cache: " << nMissing << " of " << (nScint*16)
+                 << " expected graphs missing from file!" << endl;
+    };
+    loadCountGraphs(gCountGraphs_P16, "P16", 4, gCountsValid_P16);
+    loadCountGraphs(gCountGraphs_P12, "P12", 3, gCountsValid_P12);
+
+    f->Close();
+    delete f;
+
+    cout << "\n=== Scan cache loaded: " << filename << " ===" << endl;
+    cout << "  gScanDir = " << gScanDir << endl;
+    cout << Form("  R_P16 = %.6f   R_P12 = %.6f   P_beam = %.4f",
+                 gInelFactor_P16, gInelFactor_P12, gBeamPol) << endl;
+    cout << "  P16 count-cache: " << (gCountsValid_P16 ? "loaded" : "not present in cache") << endl;
+    cout << "  P12 count-cache: " << (gCountsValid_P12 ? "loaded" : "not present in cache") << endl;
+    cout << "No files reopened — call draw_scan_p16()/p12()/both() or draw_count_vs_param() now." << endl;
 }
